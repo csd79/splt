@@ -1,1 +1,10 @@
+Add disp & step fn params to the following functions (also, switch to keywords if there are too many args):
+prune
+split-autofilter
+split-chunks
+wbooks->wsheets
+wsheets->1sheet
+copy-ws
+
+
 Create new GUI for all the functions.

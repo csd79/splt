@@ -112,7 +112,7 @@
   (with-ccom-context
     (cclet* ((files  (sort (uiop:directory-files *dir*) #'astring< :key #'pathname-name))
              (xlsxs  (remove-if #'(lambda (pathname)
-                                    (stringnot-equal (pathname-type pathname) "xlsx"))
+                                    (string-not-equal (pathname-type pathname) "xlsx"))
                                 files))
              (result (concatenate 'string directory "_EREDMÉNY_.xlsx"))
              (excel  (com:create-object :progid "Excel.Application")))
@@ -136,12 +136,16 @@
 
 (defparameter *copy-paste-wait* 0.1)
 
-(defun copy-paste (source-range target-wsheet target-range)
+(defun copy-paste (source-range target-wsheet target-range &key (colwidth nil))
   "Copy contents of SRC-RANGE into TRG-RANGE of TRG-WSHEET."
   (!'copy source-range)
   (sleep *copy-paste-wait*)
   (!'paste target-wsheet target-range)
-  (sleep *copy-paste-wait*))
+  (sleep *copy-paste-wait*)
+  (when colwidth
+    (!'pastespecial target-range 8)
+    (sleep *copy-paste-wait*))
+  )
 
 
 (defun find-last-row (worksheet start column)
@@ -149,22 +153,27 @@
   (let ((xl-last (last-row worksheet)))
     (loop for r from xl-last downto start doing
           (when (not (empty-cell-p (xcell worksheet column r)))
-            (return r)))))
+            (return r))
+          finally (return (1- start)))))
 
 
-(defun copy-ws (source-ws target-ws starting-row check-column width &optional (message-stream nil))
+(defun copy-ws (source-ws target-ws starting-row check-column width &key (colwidth nil)); &optional (message-stream nil))
   "Copy contents of SOURCE-WS (columns 1 through WIDTH) from STARTING-ROW to the last row where CHECK-COLUMN is not empty, and paste it into TARGET-WS starting beneath the last row where CHECK-COLUMN is not empty."
   (cclet* ((src-last     (find-last-row source-ws starting-row check-column))
            (trg-starting (1+ (find-last-row target-ws starting-row check-column)))
            (trg-last     (- (+ src-last trg-starting) starting-row))
            (src-range    (range source-ws 1 starting-row width src-last))
-           (trg-range    (range target-ws 1 trg-starting width trg-last)))
-    (when message-stream
-      (format message-stream "~a-~a   -->   ~a-~a~%" starting-row src-last trg-starting trg-last))
-    (copy-paste src-range target-ws trg-range)))
+           (trg-range    (range target-ws 1 trg-starting width trg-last))
+           (row-count    (- src-last starting-row -1)))
+#|    (when message-stream
+      (format message-stream "~a-~a   -->   ~a-~a~%" starting-row src-last trg-starting trg-last))|#
+    (unless (zerop row-count)
+      (copy-paste src-range target-ws trg-range :colwidth colwidth))
+    row-count))
 
 
-(defun wsheets->1sheet (infile outfile)
+(defun wsheets->1sheet (infile outfile starting-row check-column width)
+  "Copy the contents of all worksheets from INFILE into one worksheet in OUTFILE (a new file)."
   (with-ccom-context
     (cclet* ((excel (com:create-object :progid "Excel.Application")))
       (with-workbook (:app excel :wbook outbook :wsvars (outsheet) :save t :close t)
@@ -176,17 +185,70 @@
                    (outsheet (!'item (?'worksheets outbook) 1)))
             (loop for i from 2 upto count
                   for insheet = (!'item insheets i) doing
-                  (copy-ws insheet outsheet 3 2 10))))))))
+                  (copy-ws insheet outsheet starting-row check-column width))))))))
+
+
+(defun join-worksheets (infiles outfile obj &key (ws-number 1) (starting-row 2) (check-column 3) (width 30))
+;                                (message-fn nil) (step-fn nil))
+  "Copy contents of WSHEET from all INFILES into one sheet in OUTFILE (a new file)."
+#|  (flet ((message (&rest args) (when message-fn (apply message-fn args)))
+         (step (&rest args) (when step-fn (apply step-fn args))))|#
+    (with-ccom-context
+      (cclet* ((excel  (com:create-object :progid "Excel.Application"))
+               (first? t)
+               (copied 0))
+        (excellerate (excel)
+          ;; Open output file
+          (with-local-copies ((outf/ outfile :new-file t))
+            (with-workbook (:app excel :wbook outbook :wsvars (outsheet) :save t :close t)
+              (!'saveas outbook outf/)
+              ;; Loop over input files.
+              (loop for infile in infiles doing
+                    ;; If infile exists:
+                    (if (probe-file infile)
+                      ;; Open infile for editing. In case of a condition, sign unhandled error on display.
+                      (multiple-value-bind (result condition)
+                          (ignore-errors
+                            (with-local-copies ((inf/ infile))
+                              (with-workbook (:app excel :wbook inbook :open inf/ :wsvars (1st-in)
+                                              :save t :close t)
+                                ;; When input file exists, find the required worksheet in it.
+                                (cclet* ((insheet (!'item (?'worksheets inbook) ws-number)))
+                                  ;; If this isqrt the first input file, copy header as well.
+                                  (if first?
+                                    (progn
+                                      (setf copied (copy-ws insheet outsheet 1 check-column width :colwidth t))
+                                      (setf first? nil))
+                                    ;; Otherwise, just copy the body.
+                                    (setf copied (copy-ws insheet outsheet starting-row check-column width)))))))
+                        (declare (ignore result))
+                        (if (not condition)
+                          ;; Print message about whether the file was processed or not.
+                          (disp obj "~a.xlsx: ~a sor másolva.~2%" (pathname-name infile) copied)
+                          ;; ERROR
+                          (let ((error-message (format nil "Kezeletlen hiba a ~a.xlsx fájl használatakor!~2%"
+                                                       (pathname-name infile))))
+                            (disp obj error-message)
+                            (wax::queue-errorlog obj error-message))
+                            ))
+                      ;; If infile doesn't exist, display warning.
+                      (disp obj "~a.xlsx nem található.~2%" (pathname-name infile)))
+                    ;; Step progress bar.
+                    (pstep obj))
+              ))))))
+
+
+;;; ---------------------------------------------------------------
+;;; Sandbox
 
 
 #|(defmacro runenv ((args-var) &body body)
   "Put command line arguments into ARGS-VAR, then execute BODY with MS Office property accessors on."
   `(let ((,args-var (rest sys:*line-arguments-list*)))
      ,@body))|#
-     
 
-;;; ---------------------------------------------------------------
-;;; Sandbox
+
+
 
 
 #|(defparameter *dir*

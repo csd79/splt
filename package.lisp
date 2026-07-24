@@ -5,7 +5,7 @@
 
 
 (defpackage #:splt
-  (:use #:cl #:ccom4 #:ccoffice #:achar)
+  (:use #:cl #:utils #:ccom4 #:ccoffice #:achar #:wax)
   (:export #:categories
            #:newfile-name
            #:find-end
@@ -21,5 +21,5 @@
            #:find-last-row
            #:copy-ws
            #:wsheets->1wsheet
-           ;#:splt-start
-           )
+           #:join-worksheets
+           ))
