@@ -91,26 +91,114 @@
                 (!'close new-wb)))))))
 
 
+(defparameter *pv* "C:\\Users\\CselovszkiD\\Downloads\\2026.09.24. Körlevél\\polgármesteri\\véleménylapok\\_TK_polgármesteri véleménylap.xlsx")
+
 (defun split-chunks (file column &optional (start 2))
   "Split first worksheet of an Excel workbook on given column by copying source file and deleting unnecessary rows."
   (with-ccom-context
-    (with-workbook (:wbook wbook :open file :wsvars (ws1) :save nil :close t)
-      (let ((categories (categories ws1 column start)))
+    (cclet* ((excel (com:create-object :progid "Excel.Application")))
+      (let ((categories nil))
+
+        (with-workbook (:app excel :wbook wbook :open file :wsvars (ws1) :read-only t :save nil :close t)
+          (excellerate (excel t)
+            (setf categories (coerce (categories ws1 column start) 'list))))
         (pprint categories)
-        (loop for category across categories doing
-              (with-workbook (:wbook wbook :open file :wsvars (nws1) :save nil :close nil)
-                (let ((newfile-name (newfile-name category file)))
-                  (!'saveas wbook (namestring newfile-name))
-                  (prune nws1 column category start :verbose t)
-                  (!'save wbook)
-                  (print newfile-name)
-                  (!'close wbook))))))))
+
+        (mapc #'(lambda (category)
+                  (with-workbook (:app excel :wbook wbook :open file :wsvars (nws1) :save t :close t)
+                    (!'Activate wbook)
+                    (excellerate (excel t)
+                      (let ((newfile-name (newfile-name category file)))
+                        (!'saveas wbook (namestring newfile-name))
+                        (prune nws1 column category start :verbose t)
+                        (print newfile-name)))))
+              categories)))))
+
+#|
+ This is REALLY slow with big files/lots of categories.
+
+ I'm not sure if COM support multithreading. If it does, this could be sped up using Lparallel,
+ but only if I can bind a separate instance of Excel to each working thread.
+ |#
+
+;(defparameter ff "C:\\Users\\cselovszkid\\Munka\\2026.07.26. Végre emelés\\_Margó_szétszedés_\\_ismétlés_\\Gyakornok - 2026.01.02. elõtti\\IT0008_gyakornok_20260102_elõtti_betöltõ.xlsx")
+(defparameter ff "C:\\Users\\csd79\\Downloads\\_Szétszedés\\__\\Döntési táblázat_2026 tavasz_eredménytelen pályázati eljárások_2026.08.07_1_2 ÉVES.xlsx")
+
+
+(defun edges (length part-count part-number)
+  (let ((part-length (round (/ length part-count))))
+    (list (max (* part-length part-number) 0)
+          (min (* part-length (1+ part-number)) (1- length)))))
+
+
+(defun split-chunks-mt-worker (thread-name file column start categories)
+  (lambda ()
+;    (format t "~a~6%" categories)))
+    (with-local-copies ((file/ file :read-only t))
+      (cclet* ((excel (com:create-object :progid "Excel.Application")))
+        (mapc #'(lambda (category)
+                  (with-workbook (:app excel :wbook wbook :open file/ :wsvars (nws1) :save t :close t)
+                    (excellerate (excel)
+                      (let ((newfile-name (newfile-name category file)))
+                        (!'saveas wbook (namestring newfile-name))
+                        (prune nws1 column category start :verbose t)
+                        (format t "~a: done ~a~%" thread-name newfile-name)
+                        ))))
+              categories)))))
+
+(defun split-chunks-mt (file column &key (start 2) (threads 1))
+  "Split first worksheet of an Excel workbook on given column by copying source file and deleting unnecessary rows."
+  (with-ccom-context
+    (cclet* ((excel (com:create-object :progid "Excel.Application")))
+      (let ((categories nil))
+
+        (with-workbook (:app excel :wbook wbook :open file :wsvars (ws1) :read-only t :save nil :close t)
+          (excellerate (excel)
+            (setf categories (coerce (categories ws1 column start) 'list))))
+        (pprint categories)
+
+        (let ((length (length categories)))
+          (dotimes (i threads)
+            (let ((thread-name (format nil "split-chunks-worker #~a" i)))
+              (mp:process-run-function
+               thread-name nil
+               (split-chunks-mt-worker thread-name file column start
+                                       (apply #'subseq categories
+                                              (edges length threads i)))))))))))
+
+;; ÖSSZEAKAD   :(
+
+#|
+(defun mttw (name)
+  (lambda ()
+    (format t "~%Starting log for ~A..." name)
+    (sleep 6)
+    (format t "~%Finished log for ~A." name)))
   
+(defun mtt ()
+  (mp:process-run-function "Background Logger" nil (mttw "alma"))
+  (sleep 1)
+  (mp:process-run-function "Background Logger" nil (mttw "körte"))
+  (sleep 1)
+  (mp:process-run-function "Background Logger" nil (mttw "barack")))
+|#
+
+
+
+
+
+
+
+
+(defparameter *veldir*
+  "C:\\Users\\CselovszkiD\\Downloads\\2026.09.24. Körlevél\\split\\")
+
 
 (defun wbooks->wsheets (directory &optional (rowheight nil))
   "Collect the first worksheet of every workbook in DIRECTORY into a new workbook."
   (with-ccom-context
-    (cclet* ((files  (sort (uiop:directory-files *dir*) #'astring< :key #'pathname-name))
+;    (cclet* ((files  (sort (uiop:directory-files *dir*) #'astring< :key #'pathname-name))
+    (cclet* ((files  (sort (uiop:directory-files directory) #'astring< :key #'pathname-name))
              (xlsxs  (remove-if #'(lambda (pathname)
                                     (string-not-equal (pathname-type pathname) "xlsx"))
                                 files))
@@ -125,7 +213,9 @@
               (with-workbook (:app excel :wbook inbook :open (namestring infile) :wsvars (inws) :close t)
                 (!'copy inws last-sheet))
               (print inname)
-              (setf (?'name (!'item outwsheets (1- (?'count outwsheets)))) inname)
+              (setf (?'name (!'item outwsheets (1- (?'count outwsheets))))
+;                    inname)
+                    (concatenate 'string (first (str:words inname)) " TK"))
               (when rowheight
                 (setf (?'rowheight (used-range (!'item outwsheets (1- (?'count outwsheets))))) rowheight)))))))))
 
@@ -172,6 +262,12 @@
     row-count))
 
 
+(defparameter *k1* "C:\\Users\\CselovszkiD\\Downloads\\2026.09.24. Körlevél\\küldés1\\_TK_Intézményi alkalmazotti véleménylap (minden TK saját munkalapon).xlsx")
+
+(defparameter *k2* "C:\\Users\\CselovszkiD\\Downloads\\2026.09.24. Körlevél\\out.xlsx")
+
+
+
 (defun wsheets->1sheet (infile outfile starting-row check-column width)
   "Copy the contents of all worksheets from INFILE into one worksheet in OUTFILE (a new file)."
   (with-ccom-context
@@ -188,7 +284,7 @@
                   (copy-ws insheet outsheet starting-row check-column width))))))))
 
 
-(defun join-worksheets (infiles outfile obj &key (ws-number 1) (starting-row 2) (check-column 3) (width 30))
+#|(defun join-worksheets (infiles outfile obj &key (ws-number 1) (starting-row 2) (check-column 3) (width 30))
 ;                                (message-fn nil) (step-fn nil))
   "Copy contents of WSHEET from all INFILES into one sheet in OUTFILE (a new file)."
 #|  (flet ((message (&rest args) (when message-fn (apply message-fn args)))
@@ -235,6 +331,51 @@
                       (disp obj "~a.xlsx nem található.~2%" (pathname-name infile)))
                     ;; Step progress bar.
                     (pstep obj))
+              ))))))|#
+(defun join-worksheets (infiles outfile obj intf s &key (ws-number 1) (starting-row 2) (check-column 3) (width 30))
+  "Copy contents of WSHEET from all INFILES into one sheet in OUTFILE (a new file)."
+    (with-ccom-context
+      (cclet* ((excel  (com:create-object :progid "Excel.Application"))
+               (first? t)
+               (copied 0))
+        (excellerate (excel)
+          ;; Open output file
+          (with-local-copies ((outf/ outfile :new-file t))
+            (with-workbook (:app excel :wbook outbook :wsvars (outsheet) :save t :close t)
+              (!'saveas outbook outf/)
+              ;; Loop over input files.
+              (loop for infile in infiles doing
+                    ;; If infile exists:
+                    (if (probe-file infile)
+                      ;; Open infile for editing. In case of a condition, sign unhandled error on display.
+                      (multiple-value-bind (result condition)
+                          (ignore-errors
+                            (with-local-copies ((inf/ infile))
+                              (with-workbook (:app excel :wbook inbook :open inf/ :wsvars (1st-in)
+                                              :save t :close t)
+                                ;; When input file exists, find the required worksheet in it.
+                                (cclet* ((insheet (!'item (?'worksheets inbook) ws-number)))
+                                  ;; If this isqrt the first input file, copy header as well.
+                                  (if first?
+                                    (progn
+                                      (setf copied (copy-ws insheet outsheet 1 check-column width :colwidth t))
+                                      (setf first? nil))
+                                    ;; Otherwise, just copy the body.
+                                    (setf copied (copy-ws insheet outsheet starting-row check-column width)))))))
+                        (declare (ignore result))
+                        (if (not condition)
+                          ;; Print message about whether the file was processed or not.
+                          (format s "~a.xlsx: ~a sor másolva.~2%" (pathname-name infile) copied)
+                          ;; ERROR
+                          (let ((error-message (format nil "Kezeletlen hiba a ~a.xlsx fájl használatakor!~2%"
+                                                       (pathname-name infile))))
+                            (format s error-message)
+                            (wax::queue-errorlog obj error-message))
+                            ))
+                      ;; If infile doesn't exist, display warning.
+                      (format s "~a.xlsx nem található.~2%" (pathname-name infile)))
+                    ;; Step progress bar.
+                    (progress intf))
               ))))))
 
 
